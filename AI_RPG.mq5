@@ -1,10 +1,8 @@
 //+------------------------------------------------------------------+
-//| AI_RPG.mq5 — AI Trading RPG Expert Advisor                      |
-//| Connects to Linux VPS Oracle Fleet via HTTP API                  |
+//| AI_RPG.mq5 — AI Trading RPG Expert Advisor v2                   |
 //+------------------------------------------------------------------+
 #property copyright "AI Trading RPG"
-#property version   "1.00"
-#property strict
+#property version   "2.00"
 
 #include <Trade\Trade.mqh>
 
@@ -24,7 +22,7 @@ int OnInit()
    trade.SetExpertMagicNumber(Magic);
    trade.SetDeviationInPoints(Deviation);
    trade.SetTypeFilling(ORDER_FILLING_RETURN);
-   Print("AI_RPG EA started | VPS: ", LinuxVPS);
+   Print("AI_RPG v2 started | VPS: ", LinuxVPS);
    SendCandles("M15", PERIOD_M15, 200);
    SendCandles("H1",  PERIOD_H1,  200);
    SendCandles("H4",  PERIOD_H4,  200);
@@ -33,6 +31,8 @@ int OnInit()
    EventSetTimer(PollSec);
    return(INIT_SUCCEEDED);
 }
+
+void OnDeinit(const int reason) { EventKillTimer(); Print("AI_RPG stopped"); }
 
 //+------------------------------------------------------------------+
 void OnTimer()
@@ -60,11 +60,14 @@ void SendPrice()
       "\"account\":{\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,"
       "\"freeMargin\":%.2f,\"profit\":%.2f,\"currency\":\"%s\",\"leverage\":%d}}",
       _Symbol, tick.bid, tick.ask, (int)tick.time,
-      AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY),
-      AccountInfoDouble(ACCOUNT_MARGIN), AccountInfoDouble(ACCOUNT_FREEMARGIN),
-      AccountInfoDouble(ACCOUNT_PROFIT), AccountInfoString(ACCOUNT_CURRENCY),
+      AccountInfoDouble(ACCOUNT_BALANCE),
+      AccountInfoDouble(ACCOUNT_EQUITY),
+      AccountInfoDouble(ACCOUNT_MARGIN),
+      AccountInfoDouble(ACCOUNT_FREEMARGIN),
+      AccountInfoDouble(ACCOUNT_PROFIT),
+      AccountInfoString(ACCOUNT_CURRENCY),
       (int)AccountInfoInteger(ACCOUNT_LEVERAGE));
-   PostRequest("/api/mt5/price", body);
+   HttpPost("/api/mt5/price", body);
 }
 
 //+------------------------------------------------------------------+
@@ -79,107 +82,99 @@ void SendCandles(string tfName, ENUM_TIMEFRAMES tf, int count)
       if(i > 0) candles += ",";
       candles += StringFormat(
          "{\"time\":%d,\"open\":%.5f,\"high\":%.5f,\"low\":%.5f,\"close\":%.5f,\"volume\":%d}",
-         (int)rates[i].time, rates[i].open, rates[i].high,
-         rates[i].low, rates[i].close, (int)rates[i].tick_volume);
+         (int)rates[i].time,rates[i].open,rates[i].high,
+         rates[i].low,rates[i].close,(int)rates[i].tick_volume);
    }
    candles += "]";
    string body = StringFormat(
       "{\"symbol\":\"%s\",\"timeframe\":\"%s\",\"candles\":%s}",
       _Symbol, tfName, candles);
-   string result = PostRequest("/api/mt5/candles", body);
+   HttpPost("/api/mt5/candles", body);
    Print("Candles ", tfName, ": ", copied, " bars sent");
 }
 
 //+------------------------------------------------------------------+
 void CheckSignal()
 {
-   string result = GetRequest("/api/mt5/signal");
-   if(StringLen(result) < 5) return;
-   if(StringFind(result, "\"signal\":null") >= 0) return;
-   if(StringFind(result, "\"signal\":{}") >= 0) return;
+   string resp = HttpGet("/api/mt5/signal");
+   if(StringLen(resp) < 5) return;
+   if(StringFind(resp,"\"signal\":null") >= 0) return;
 
-   string action = ExtractStr(result, "action");
+   string action = JsonStr(resp, "action");
    if(action != "BUY" && action != "SELL") return;
 
-   double lot = StringToDouble(ExtractStr(result, "lotSize"));
+   double lot = StringToDouble(JsonStr(resp,"lotSize"));
    if(lot <= 0) lot = LotSize;
-   double sl = StringToDouble(ExtractStr(result, "sl"));
-   double tp = StringToDouble(ExtractStr(result, "tp"));
-   string ticket = ExtractStr(result, "ticket");
+   double sl = StringToDouble(JsonStr(resp,"sl"));
+   double tp = StringToDouble(JsonStr(resp,"tp"));
+   string ticket = JsonStr(resp,"ticket");
 
-   Print("Signal: ", action, " lot=", lot, " SL=", sl, " TP=", tp);
+   Print("Signal: ",action," lot=",lot," SL=",sl," TP=",tp);
 
    bool ok = false;
-   if(action == "BUY")
-      ok = trade.Buy(lot, _Symbol, 0, sl, tp, "AI_RPG");
-   else
-      ok = trade.Sell(lot, _Symbol, 0, sl, tp, "AI_RPG");
+   if(action == "BUY")  ok = trade.Buy(lot,_Symbol,0,sl,tp,"AI_RPG");
+   if(action == "SELL") ok = trade.Sell(lot,_Symbol,0,sl,tp,"AI_RPG");
 
    if(ok)
    {
-      Print("Trade EXECUTED: ", action, " @ ", trade.ResultPrice(), " #", trade.ResultOrder());
+      Print("EXECUTED: ",action," @ ",trade.ResultPrice()," #",trade.ResultOrder());
       string body = StringFormat(
          "{\"ticket\":\"%s\",\"mt5Ticket\":%d,\"action\":\"%s\","
          "\"price\":%.5f,\"lot\":%.2f,\"sl\":%.5f,\"tp\":%.5f,\"time\":%d}",
-         ticket, (int)trade.ResultOrder(), action,
-         trade.ResultPrice(), lot, sl, tp, (int)TimeCurrent());
-      PostRequest("/api/mt5/executed", body);
+         ticket,(int)trade.ResultOrder(),action,
+         trade.ResultPrice(),lot,sl,tp,(int)TimeCurrent());
+      HttpPost("/api/mt5/executed", body);
    }
-   else
-      Print("Trade FAILED retcode=", trade.ResultRetcode());
+   else Print("FAILED retcode=",trade.ResultRetcode());
 }
 
 //+------------------------------------------------------------------+
 void CheckClose()
 {
-   string result = GetRequest("/api/mt5/close");
-   if(StringFind(result, "null") >= 0) return;
-   string ticketStr = ExtractStr(result, "closeTicket");
-   if(StringLen(ticketStr) == 0 || ticketStr == "null") return;
-   ulong mt5Ticket = (ulong)StringToInteger(ticketStr);
-   if(PositionSelectByTicket(mt5Ticket))
-      trade.PositionClose(mt5Ticket);
+   string resp = HttpGet("/api/mt5/close");
+   if(StringFind(resp,"null") >= 0) return;
+   string ts = JsonStr(resp,"closeTicket");
+   if(StringLen(ts)==0 || ts=="null") return;
+   ulong t = (ulong)StringToInteger(ts);
+   if(PositionSelectByTicket(t)) trade.PositionClose(t);
 }
 
 //+------------------------------------------------------------------+
-string GetRequest(string endpoint)
+string HttpGet(string path)
 {
-   string headers = "X-API-Key: " + ApiKey + "\r\n";
-   char result[]; string rh;
-   int res = WebRequest("GET", LinuxVPS + endpoint, headers, 5000, NULL, result, rh);
-   if(res == 200) return CharArrayToString(result);
+   char   data[1], res[];
+   string hdrs = "X-API-Key: "+ApiKey+"\r\n";
+   string rh;
+   int code = WebRequest("GET", LinuxVPS+path, hdrs, "", 5000, data, 0, res, rh);
+   if(code == 200) return CharArrayToString(res);
    return "";
 }
 
 //+------------------------------------------------------------------+
-string PostRequest(string endpoint, string body)
+string HttpPost(string path, string body)
 {
-   string headers = "Content-Type: application/json\r\nX-API-Key: " + ApiKey + "\r\n";
-   char data[], result[]; string rh;
+   char   data[], res[];
+   string hdrs = "Content-Type: application/json\r\nX-API-Key: "+ApiKey+"\r\n";
+   string rh;
    StringToCharArray(body, data, 0, StringLen(body));
-   int res = WebRequest("POST", LinuxVPS + endpoint, headers, 5000, data, result, rh);
-   if(res == 200) return CharArrayToString(result);
+   int code = WebRequest("POST", LinuxVPS+path, hdrs, "", 5000, data, ArraySize(data)-1, res, rh);
+   if(code == 200) return CharArrayToString(res);
    return "";
 }
 
 //+------------------------------------------------------------------+
-string ExtractStr(string json, string key)
+string JsonStr(string json, string key)
 {
-   string search = "\"" + key + "\":";
-   int start = StringFind(json, search);
-   if(start < 0) return "";
-   start += StringLen(search);
-   while(start < StringLen(json) && StringGetCharacter(json, start) == ' ') start++;
-   bool isStr = (StringGetCharacter(json, start) == '"');
-   if(isStr) start++;
-   int end = start;
-   if(isStr)
-      while(end < StringLen(json) && StringGetCharacter(json, end) != '"') end++;
-   else
-      while(end < StringLen(json) && StringGetCharacter(json, end) != ',' && StringGetCharacter(json, end) != '}') end++;
-   return StringSubstr(json, start, end - start);
+   string s = "\""+key+"\":";
+   int p = StringFind(json,s);
+   if(p < 0) return "";
+   p += StringLen(s);
+   while(p < StringLen(json) && StringGetCharacter(json,p)==' ') p++;
+   bool q = (StringGetCharacter(json,p)=='"');
+   if(q) p++;
+   int e = p;
+   if(q) while(e<StringLen(json)&&StringGetCharacter(json,e)!='"') e++;
+   else  while(e<StringLen(json)&&StringGetCharacter(json,e)!=','&&StringGetCharacter(json,e)!='}') e++;
+   return StringSubstr(json,p,e-p);
 }
-
-//+------------------------------------------------------------------+
-void OnDeinit(const int reason) { EventKillTimer(); Print("AI_RPG EA stopped"); }
 //+------------------------------------------------------------------+
