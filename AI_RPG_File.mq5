@@ -42,7 +42,8 @@ void CheckSignalFile()
       content += FileReadString(fh) + "\n";
    FileClose(fh);
 
-   content = StringTrimRight(StringTrimLeft(content));
+   StringTrimRight(content);
+   StringTrimLeft(content);
    if(StringLen(content) < 3) return;
 
    // Check ว่า done แล้วหรือยัง
